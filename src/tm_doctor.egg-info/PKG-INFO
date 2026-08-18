@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: tm-doctor
+Version: 0.1.0
+Summary: Diagnostic and recovery tools for macOS Time Machine
+Author: HJP
+License-Expression: MIT
+Project-URL: Repository, https://github.com/YOUR-GITHUB-USERNAME/tm-doctor
+Project-URL: Issues, https://github.com/YOUR-GITHUB-USERNAME/tm-doctor/issues
+Keywords: macos,time-machine,backup,apfs
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: click>=8.1
+Requires-Dist: rich>=14.0

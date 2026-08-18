@@ -1,0 +1,2 @@
+[console_scripts]
+tm-doctor = tm_doctor.cli:cli
