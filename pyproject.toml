@@ -27,9 +27,15 @@ dependencies = [
 [project.scripts]
 tm-doctor = "tm_doctor.cli:cli"
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.9",
+]
+
 [project.urls]
-Repository = "https://github.com/YOUR-GITHUB-USERNAME/tm-doctor"
-Issues = "https://github.com/YOUR-GITHUB-USERNAME/tm-doctor/issues"
+Repository = "https://github.com/hpottinger/tm-doctor"
+Issues = "https://github.com/hpottinger/tm-doctor/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

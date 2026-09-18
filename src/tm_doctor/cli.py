@@ -20,7 +20,6 @@ from rich.progress import BarColumn, Progress, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-
 VERSION = version("tm-doctor")
 
 TRANSACTION_PATTERN = re.compile(
@@ -32,7 +31,7 @@ BACKUP_PATTERN = re.compile(
     r"(?P<timestamp>\d{4}-\d{2}-\d{2}-\d{6})\.backup$"
 )
 
-DEFAULT_WIDTH=78
+DEFAULT_WIDTH = 78
 
 console = Console()
 
@@ -96,6 +95,55 @@ def run_command(
         capture_output=True,
         check=False,
     )
+
+
+def _parse_destination_block(values: dict[str, str]) -> Destination | None:
+    destination_id = values.get("ID")
+    if not destination_id:
+        return None
+    mount_point = values.get("Mount Point")
+    return Destination(
+        name=values.get("Name"),
+        kind=values.get("Kind"),
+        destination_id=destination_id,
+        mount_point=Path(mount_point) if mount_point else None,
+    )
+
+
+def get_destinations() -> list[Destination]:
+    """Return all configured Time Machine destinations."""
+
+    result = run_command("tmutil", "destinationinfo")
+
+    if result.returncode != 0:
+        raise click.ClickException(
+            "Unable to query Time Machine destination:\n"
+            f"{result.stderr.strip()}"
+        )
+
+    destinations: list[Destination] = []
+    current: dict[str, str] = {}
+
+    for line in result.stdout.splitlines():
+        if line.startswith("="):
+            if current:
+                dest = _parse_destination_block(current)
+                if dest:
+                    destinations.append(dest)
+                current = {}
+            continue
+
+        key, separator, value = line.partition(":")
+        if not separator:
+            continue
+        current[key.strip()] = value.strip()
+
+    if current:
+        dest = _parse_destination_block(current)
+        if dest:
+            destinations.append(dest)
+
+    return destinations
 
 
 def get_destination() -> Destination:
@@ -338,10 +386,9 @@ def get_backup_status() -> BackupStatus:
     )
 
 
-def collect_report() -> DoctorReport:
-    """Collect all v1 diagnostic information."""
+def collect_report(destination: Destination) -> DoctorReport:
+    """Collect all v1 diagnostic information for one destination."""
 
-    destination = get_destination()
     backup_status = get_backup_status()
 
     backups: list[Path] | None = None
@@ -366,6 +413,38 @@ def collect_report() -> DoctorReport:
         transactions=transactions,
         backup_status=backup_status,
     )
+
+
+def report_to_dict(report: DoctorReport) -> dict[str, Any]:
+    """Serialize a DoctorReport to a JSON-compatible dict."""
+
+    dest = report.destination
+    return {
+        "destination": {
+            "name": dest.name,
+            "kind": dest.kind,
+            "destination_id": dest.destination_id,
+            "mount_point": str(dest.mount_point) if dest.mount_point else None,
+            "mounted": dest.mounted,
+        },
+        "backup_status": {
+            "running": report.backup_status.running,
+            "phase": report.backup_status.phase,
+            "percent": report.backup_status.percent,
+            "time_remaining": report.backup_status.time_remaining,
+        },
+        "backups": [str(p) for p in report.backups] if report.backups is not None else None,
+        "latest_backup": str(report.latest_backup) if report.latest_backup else None,
+        "transactions": [
+            {
+                "path": str(t.path),
+                "timestamp": t.timestamp.isoformat(),
+                "kind": t.kind,
+                "snapshot_state": t.snapshot_state,
+            }
+            for t in report.transactions
+        ] if report.transactions is not None else None,
+    }
 
 
 def format_timestamp(timestamp: datetime | None) -> str:
@@ -668,6 +747,37 @@ def render_housekeeping(report: DoctorReport) -> int:
     return 0
 
 
+def _interrupted_advice_applies(report: DoctorReport) -> bool:
+    if report.destination.kind != "Local":
+        return False
+    if report.transactions is None:
+        return False
+    _, states = transaction_stats(report.transactions, "interrupted")
+    interrupted_16 = states["16"]
+    backup_count = len(report.backups) if report.backups is not None else 0
+    threshold = max(100, backup_count * 5)
+    return interrupted_16 > threshold
+
+
+def render_advice(report: DoctorReport) -> None:
+    if _interrupted_advice_applies(report):
+        console.print()
+        console.print(
+            Panel(
+                (
+                    "A high number of interrupted backups was detected on a "
+                    "local destination.\n\n"
+                    "If your connection path is complex -- for example, through "
+                    "a dock or USB hub -- consider connecting the drive directly "
+                    "to your Mac to see whether interruptions decrease."
+                ),
+                title="Advice",
+                border_style="blue",
+                width=DEFAULT_WIDTH,
+            )
+        )
+
+
 def render_overall_status(exit_status: int) -> None:
     """Render the overall diagnostic result."""
 
@@ -685,13 +795,25 @@ def render_overall_status(exit_status: int) -> None:
 
 @click.command()
 @click.version_option(VERSION)
-def cli() -> None:
+@click.option("--json", "output_json", is_flag=True, default=False, help="Output results as JSON.")
+def cli(output_json: bool) -> None:
     """
     Inspect a macOS Time Machine destination.
 
     Version 0.1 performs read-only diagnostics. It does not modify,
     repair, mount, unmount, or delete anything.
     """
+
+    destinations = get_destinations()
+    overall_exit = 0
+
+    if output_json:
+        reports = []
+        for destination in destinations:
+            report = collect_report(destination)
+            reports.append(report_to_dict(report))
+        click.echo(json.dumps(reports, indent=2))
+        raise SystemExit(0)
 
     console.print()
     console.print(
@@ -700,19 +822,25 @@ def cli() -> None:
     )
     console.print()
 
-    report = collect_report()
+    reports = [collect_report(dest) for dest in destinations]
 
-    render_summary(report)
-    console.print()
+    for report in reports:
+        render_summary(report)
+        console.print()
 
-    render_backup_status(report.backup_status)
+        render_backup_status(report.backup_status)
 
-    exit_status = render_housekeeping(report)
+        exit_status = render_housekeeping(report)
+        overall_exit = max(overall_exit, exit_status)
 
-    console.print()
-    render_overall_status(exit_status)
+        console.print()
 
-    raise SystemExit(exit_status)
+    render_overall_status(overall_exit)
+
+    for report in reports:
+        render_advice(report)
+
+    raise SystemExit(overall_exit)
 
 
 if __name__ == "__main__":

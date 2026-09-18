@@ -342,6 +342,26 @@ When adding a diagnostic:
 
 Do not build repair behavior merely because a diagnostic identifies a problem.
 
+## Tracer bullet
+
+For every new capability, build the thinnest possible end-to-end slice
+through all layers first (The Pragmatic Programmer, Hunt & Thomas).
+
+The slice must:
+
+- touch every layer: macOS interrogation -> domain model -> rendering
+- produce real observable output (not a stub or placeholder)
+- stay in the codebase -- it is not a throwaway prototype
+
+Only after the tracer is working should you fill in breadth: more files,
+error handling, progress reporting, additional edge cases.
+
+For restore verification, the tracer is:
+mount one snapshot -> discover the source volume -> map one file path ->
+rsync it to a temp directory -> verify the content -> unmount.
+
+Apply this pattern to every new diagnostic, subcommand, or output format.
+
 ## Current scope
 
 Version 0.1 is read-only.
