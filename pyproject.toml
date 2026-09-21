@@ -34,8 +34,8 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/hpottinger/tm-doctor"
-Issues = "https://github.com/hpottinger/tm-doctor/issues"
+Repository = "https://github.com/hardyoyo/tm-doctor"
+Issues = "https://github.com/hardyoyo/tm-doctor/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
