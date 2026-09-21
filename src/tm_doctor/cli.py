@@ -403,6 +403,9 @@ _HEAVY_PATH_CANDIDATES: list[Path] = [
     Path.home() / "Library" / "Caches" / "Homebrew",
     # Gaming
     Path.home() / "Library" / "Application Support" / "Steam" / "steamapps",
+    # Microsoft Office / Outlook (large SQLite stores, rewritten on every sync)
+    Path.home() / "Library" / "Group Containers" / "UBF8T346G9.Office",
+    Path.home() / "Library" / "Containers" / "com.microsoft.Outlook",
 ]
 
 
