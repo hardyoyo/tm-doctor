@@ -1,5 +1,7 @@
 # Time Machine Doctor
 
+[![CI](https://github.com/hardyoyo/tm-doctor/actions/workflows/ci.yml/badge.svg)](https://github.com/hardyoyo/tm-doctor/actions/workflows/ci.yml)
+
 A diagnostic and recovery toolkit for macOS Time Machine.
 
 Time Machine is very good at making backups, but macOS exposes surprisingly

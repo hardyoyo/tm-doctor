@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 
 from tm_doctor.cli import (
@@ -36,7 +37,6 @@ from tm_doctor.cli import (
     report_to_dict,
     transaction_stats,
 )
-
 
 # ---------------------------------------------------------------------------
 # parse_backup_timestamp
@@ -141,14 +141,19 @@ def _make_completed(stdout: str, returncode: int = 0) -> subprocess.CompletedPro
 
 def test_parse_tmutil_status_running():
     with patch("tm_doctor.cli.run_command") as mock_run:
+
         def side_effect(*args, **kwargs):
             if args[0] == "tmutil":
                 return _make_completed(TMUTIL_STATUS_RUNNING)
             # plutil conversion -- simulate it
-            lines = kwargs.get("stdin", "").strip()
             # parse plist-style manually for test
-            data = {"Running": 1, "BackupPhase": "Copying", "Progress": {"Percent": "0.42", "TimeRemaining": 120}}
+            data = {
+                "Running": 1,
+                "BackupPhase": "Copying",
+                "Progress": {"Percent": "0.42", "TimeRemaining": 120},
+            }
             return _make_completed(json.dumps(data))
+
         mock_run.side_effect = side_effect
         result = parse_tmutil_status()
     assert result.get("Running") == 1
@@ -331,7 +336,7 @@ def test_get_destinations_multiple():
 def test_get_destinations_unavailable():
     with patch("tm_doctor.cli.run_command") as mock_run:
         mock_run.return_value = _make_completed("error output", returncode=1)
-        with pytest.raises(Exception):
+        with pytest.raises(click.ClickException):
             get_destinations()
 
 
@@ -365,7 +370,9 @@ def test_collect_report_uses_supplied_destination():
         patch("tm_doctor.cli.get_heavy_unexcluded_paths") as mock_heavy,
         patch("tm_doctor.cli.get_destination_usb_info") as mock_usb,
     ):
-        mock_status.return_value = BackupStatus(running=False, phase=None, percent=None, time_remaining=None)
+        mock_status.return_value = BackupStatus(
+            running=False, phase=None, percent=None, time_remaining=None
+        )
         mock_backups.return_value = []
         mock_latest.return_value = None
         mock_tx.return_value = []
@@ -384,7 +391,9 @@ def test_collect_report_skips_data_collection_when_unmounted():
         patch("tm_doctor.cli.get_backup_status") as mock_status,
         patch("tm_doctor.cli.get_backups") as mock_backups,
     ):
-        mock_status.return_value = BackupStatus(running=False, phase=None, percent=None, time_remaining=None)
+        mock_status.return_value = BackupStatus(
+            running=False, phase=None, percent=None, time_remaining=None
+        )
 
         report = collect_report(_UNMOUNTED_DEST)
 
@@ -399,7 +408,14 @@ def test_collect_report_skips_data_collection_when_unmounted():
 _STATUS_IDLE = BackupStatus(running=False, phase=None, percent=None, time_remaining=None)
 
 
-def _make_report(destination=_MOUNTED_DEST, backups=None, latest_backup=None, transactions=None, backup_status=_STATUS_IDLE, usb_info=None):
+def _make_report(
+    destination=_MOUNTED_DEST,
+    backups=None,
+    latest_backup=None,
+    transactions=None,
+    backup_status=_STATUS_IDLE,
+    usb_info=None,
+):
     return DoctorReport(
         destination=destination,
         backups=backups,
@@ -433,7 +449,10 @@ def test_report_to_dict_backup_status():
 
 
 def test_report_to_dict_backups():
-    backups = [Path("/Volumes/TM/2024-01-01-060000.backup"), Path("/Volumes/TM/2024-01-02-060000.backup")]
+    backups = [
+        Path("/Volumes/TM/2024-01-01-060000.backup"),
+        Path("/Volumes/TM/2024-01-02-060000.backup"),
+    ]
     report = _make_report(backups=backups, latest_backup=backups[-1])
     d = report_to_dict(report)
     assert d["backups"] == [str(p) for p in backups]
@@ -471,13 +490,19 @@ def test_report_to_dict_transactions_unavailable():
 # _interrupted_advice_applies
 # ---------------------------------------------------------------------------
 
-_LOCAL_DEST = Destination(name="Drive", kind="Local", destination_id="X", mount_point=Path("/Volumes/X"))
-_NETWORK_DEST = Destination(name="NAS", kind="Network", destination_id="Y", mount_point=Path("/Volumes/Y"))
+_LOCAL_DEST = Destination(
+    name="Drive", kind="Local", destination_id="X", mount_point=Path("/Volumes/X")
+)
+_NETWORK_DEST = Destination(
+    name="NAS", kind="Network", destination_id="Y", mount_point=Path("/Volumes/Y")
+)
 
 
 def _report_with_interrupted(destination, interrupted_state16_count, backup_count):
     txs = [_tx("interrupted", "16") for _ in range(interrupted_state16_count)]
-    backups = [Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, backup_count + 1)]
+    backups = [
+        Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, backup_count + 1)
+    ]
     return _make_report(destination=destination, transactions=txs, backups=backups)
 
 
@@ -487,7 +512,9 @@ def test_advice_applies_local_with_high_interrupted():
 
 
 def test_advice_does_not_apply_network_destination():
-    report = _report_with_interrupted(_NETWORK_DEST, interrupted_state16_count=150, backup_count=20)
+    report = _report_with_interrupted(
+        _NETWORK_DEST, interrupted_state16_count=150, backup_count=20
+    )
     assert _interrupted_advice_applies(report) is False
 
 
@@ -523,9 +550,7 @@ _DISKUTIL_HFS = """\
 _MOUNTED_DEST_OBJ = Destination(
     name="Test", kind="Local", destination_id="X", mount_point=Path("/Volumes/X")
 )
-_UNMOUNTED_DEST_OBJ = Destination(
-    name="Test", kind="Local", destination_id="X", mount_point=None
-)
+_UNMOUNTED_DEST_OBJ = Destination(name="Test", kind="Local", destination_id="X", mount_point=None)
 
 
 def _completed(returncode, stdout):
@@ -546,7 +571,9 @@ def test_get_destination_filesystem_apfs():
 
 
 def test_get_destination_filesystem_case_sensitive_apfs():
-    with patch("tm_doctor.cli.run_command", return_value=_completed(0, _DISKUTIL_APFS_CASE_SENSITIVE)):
+    with patch(
+        "tm_doctor.cli.run_command", return_value=_completed(0, _DISKUTIL_APFS_CASE_SENSITIVE)
+    ):
         assert get_destination_filesystem(_MOUNTED_DEST_OBJ) == "Case-sensitive APFS"
 
 
@@ -650,11 +677,12 @@ def test_get_heavy_unexcluded_paths_symlink_skipped():
 
 
 def _report_with_state16(previous_count, interrupted_count, backup_count):
-    txs = (
-        [_tx("previous", "16") for _ in range(previous_count)]
-        + [_tx("interrupted", "16") for _ in range(interrupted_count)]
-    )
-    backups = [Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, backup_count + 1)]
+    txs = [_tx("previous", "16") for _ in range(previous_count)] + [
+        _tx("interrupted", "16") for _ in range(interrupted_count)
+    ]
+    backups = [
+        Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, backup_count + 1)
+    ]
     return _make_report(transactions=txs, backups=backups)
 
 
@@ -901,7 +929,11 @@ def test_get_destination_usb_info_unmounted():
 def _report_with_hub_depth(hub_depth):
     txs = [_tx("interrupted", "16") for _ in range(150)]
     backups = [Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, 21)]
-    usb_info = UsbConnectionInfo(hub_depth=hub_depth, negotiated_speed=3, speed_capability=0x0300) if hub_depth is not None else None
+    usb_info = (
+        UsbConnectionInfo(hub_depth=hub_depth, negotiated_speed=3, speed_capability=0x0300)
+        if hub_depth is not None
+        else None
+    )
     return DoctorReport(
         destination=_LOCAL_DEST,
         backups=backups,
@@ -923,8 +955,11 @@ def test_advice_shown_when_behind_hub():
 
 
 def test_advice_shown_when_hub_depth_unknown():
-    report = _make_report(destination=_LOCAL_DEST, transactions=[_tx("interrupted", "16") for _ in range(150)],
-                          backups=[Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, 21)])
+    report = _make_report(
+        destination=_LOCAL_DEST,
+        transactions=[_tx("interrupted", "16") for _ in range(150)],
+        backups=[Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, 21)],
+    )
     assert _interrupted_advice_applies(report) is True
 
 
