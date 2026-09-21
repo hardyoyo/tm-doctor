@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -15,6 +16,7 @@ from typing import Any
 
 import click
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, TextColumn
 from rich.table import Table
@@ -1190,7 +1192,7 @@ def render_overall_status(exit_status: int, monitor: bool = False) -> None:
         console.print("[bold green]Overall: no severe problems detected[/bold green]")
 
 
-@click.command()
+@click.group(invoke_without_command=True)
 @click.version_option(VERSION)
 @click.option("--json", "output_json", is_flag=True, default=False, help="Output results as JSON.")
 @click.option(
@@ -1199,13 +1201,17 @@ def render_overall_status(exit_status: int, monitor: bool = False) -> None:
     default=False,
     help="Prompt to add recommended folders to the Time Machine exclusion list.",
 )
-def cli(output_json: bool, add_exclusions: bool) -> None:
+@click.pass_context
+def cli(ctx: click.Context, output_json: bool, add_exclusions: bool) -> None:
     """
     Inspect a macOS Time Machine destination.
 
-    By default, performs read-only diagnostics. Pass --add-exclusions to
-    be prompted before adding any recommended folders to the exclusion list.
+    Run without a subcommand to perform read-only diagnostics.
+    Use the watch subcommand to monitor backup progress live.
     """
+
+    if ctx.invoked_subcommand is not None:
+        return
 
     destinations = get_destinations()
     overall_exit = 0
@@ -1246,6 +1252,67 @@ def cli(output_json: bool, add_exclusions: bool) -> None:
         apply_exclusions(reports)
 
     raise SystemExit(overall_exit)
+
+
+def _build_watch_panel(destinations: list[Destination], status: BackupStatus) -> Panel:
+    """Build the Live display panel for the watch command."""
+    text = Text()
+
+    for dest in destinations:
+        text.append(dest.name or "Unknown", style="bold")
+        text.append("  ")
+        mount_label = "mounted" if dest.mounted else "not mounted"
+        mount_style = "green" if dest.mounted else "yellow"
+        text.append(mount_label, style=mount_style)
+        text.append("\n")
+
+    text.append("\n")
+
+    if not status.running:
+        text.append("No backup currently running", style="dim")
+    else:
+        text.append("Phase  ", style="bold")
+        text.append(status.phase or "Unknown")
+
+        if status.percent is not None and status.percent >= 0:
+            pct = min(max(status.percent, 0.0), 1.0)
+            filled = int(pct * 40)
+            bar = "█" * filled + "░" * (40 - filled)
+            text.append(f"\n  {bar} {pct * 100:.1f}%")
+
+        if status.time_remaining is not None:
+            text.append(f"\n  ETA: {format_duration(status.time_remaining)}", style="dim")
+
+    return Panel(text, title="Time Machine Watch", border_style="blue", width=DEFAULT_WIDTH)
+
+
+@cli.command()
+@click.option(
+    "--interval",
+    "-i",
+    default=3,
+    show_default=True,
+    help="Refresh interval in seconds.",
+)
+def watch(interval: int) -> None:
+    """Watch Time Machine backup progress in real time."""
+
+    destinations = get_destinations()
+    status = get_backup_status()
+
+    try:
+        with Live(
+            _build_watch_panel(destinations, status),
+            refresh_per_second=1,
+            console=console,
+        ) as live:
+            while True:
+                time.sleep(interval)
+                destinations = get_destinations()
+                status = get_backup_status()
+                live.update(_build_watch_panel(destinations, status))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
