@@ -92,5 +92,14 @@ Unscheduled -- not committed to any version:
 - [ ] Historical snapshot browser (`tm-doctor snapshots`)
 - [ ] Multiple destination rotation health (are all destinations up to date?)
 - [ ] Backup size trending over time
-- [ ] `tm-doctor --watch` live status (poll tmutil status)
+- [x] `tm-doctor watch` live status (poll tmutil status)
+- [ ] `tm-doctor diff` -- compare two most recent backups via `tmutil compare`,
+      surface what changed (useful for diagnosing why large backups keep recurring)
+- [ ] Detect afpAccessDenied (-5000) deletion failures via the unified log and
+      surface them as a named cause in the Advice panel (currently we detect
+      state-16 accumulation but not the underlying ACL/sunlnk root cause)
+- [ ] Investigate whether it is safe to strip the `sunlnk` flag and deny-delete
+      ACL from state-16 `.previous` objects, and if so, implement as an explicit
+      `tm-doctor repair --strip-acls` subcommand with clear user consent
+      (see CLAUDE.md "Root cause of afpAccessDenied deletion failures")
 - [ ] Restore from a specific historical backup (not just latest)

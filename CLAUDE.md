@@ -235,6 +235,53 @@ roughly the same number of `afpAccessDenied (-5000)` deletion errors.
 This is useful evidence for detecting pathological housekeeping, but thresholds
 should remain conservative until more healthy systems have been sampled.
 
+### Root cause of afpAccessDenied deletion failures
+
+On one investigated destination, `ls -leO` on a state-16 `.previous` object
+revealed:
+
+```text
+drwxr-xr-x@ 5 root  wheel  sunlnk 160 Sep  2 16:30 Data
+ 0: group:everyone deny add_file,delete,add_subdirectory,delete_child,writeattr,writeextattr,chown
+```
+
+Two protections are present:
+
+1. **`sunlnk` flag** — the APFS "SUN immutable" flag, which protects the
+   object from deletion even by root.
+2. **deny-delete ACL** — `group:everyone deny delete` explicitly blocks
+   deletion for all users including `backupd`.
+
+Together these prevent Time Machine from cleaning up the object during
+`ThinningPostBackup`, causing the state-16 count to grow unboundedly.
+
+It is not yet understood why Time Machine sets these protections on some
+transaction objects and not others, or whether it is safe to strip them
+manually. Do not remove these flags without further research into the
+intended semantics.
+
+To inspect the flags on a specific transaction object:
+
+```bash
+ls -leO /Volumes/<destination>/<timestamp>.previous
+```
+
+To detect this pattern programmatically, check for the `sunlnk` flag and
+a deny-delete ACE. The `chflags` and `chmod -N` commands can strip these
+protections, but should only be used in an explicit repair command with
+clear user consent, after the safety question is resolved.
+
+### Detecting afpAccessDenied via the unified log
+
+The unified log records each deletion failure. Query with:
+
+```bash
+log show --predicate 'subsystem == "com.apple.backupd"' --last 24h | grep -i "afpAccessDenied\|error.*deleting"
+```
+
+Howard Oakley's T2M2 tool surfaces these errors in a human-readable
+timeline and is useful for confirming the pattern at scale.
+
 ## Filesystem health
 
 APFS filesystem verification is potentially disruptive because the volume may
