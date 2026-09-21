@@ -7,7 +7,7 @@ import json
 import re
 import subprocess
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -80,6 +80,10 @@ class DoctorReport:
     latest_backup: Path | None
     transactions: list[TransactionObject] | None
     backup_status: BackupStatus
+    destination_filesystem: str | None = None
+    disk_sleep: int | None = None
+    heavy_unexcluded_paths: list[Path] = field(default_factory=list)
+    usb_info: "UsbConnectionInfo | None" = None
 
 
 def run_command(
@@ -386,6 +390,208 @@ def get_backup_status() -> BackupStatus:
     )
 
 
+_HEAVY_PATH_CANDIDATES: list[Path] = [
+    # Cloud sync
+    Path.home() / "Library" / "CloudStorage",
+    Path.home() / "Dropbox",
+    Path.home() / "OneDrive",
+    Path.home() / "Google Drive",
+    # Virtual machines
+    Path.home() / "Parallels",
+    Path.home() / "Documents" / "Virtual Machines.localized",
+    # Docker / container runtimes
+    Path.home() / "Library" / "Containers" / "com.docker.docker" / "Data",
+    Path.home() / ".colima",
+    Path.home() / ".lima",
+    Path.home() / "Library" / "Application Support" / "OrbStack",
+    # Xcode build artifacts
+    Path.home() / "Library" / "Developer" / "Xcode" / "DerivedData",
+    Path.home() / "Library" / "Developer" / "Xcode" / "iOS DeviceSupport",
+    Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices",
+    # Package manager caches
+    Path.home() / ".cargo" / "registry",
+    Path.home() / ".npm",
+    Path.home() / ".gradle" / "caches",
+    Path.home() / ".m2" / "repository",
+    Path.home() / "Library" / "Caches" / "Homebrew",
+    # Gaming
+    Path.home() / "Library" / "Application Support" / "Steam" / "steamapps",
+]
+
+
+def get_destination_filesystem(destination: Destination) -> str | None:
+    if not destination.mounted or destination.mount_point is None:
+        return None
+    result = run_command("diskutil", "info", str(destination.mount_point))
+    if result.returncode != 0:
+        return None
+    match = re.search(r"File System Personality:\s+(.+)", result.stdout)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def get_disk_sleep_setting() -> int | None:
+    result = run_command("pmset", "-g")
+    if result.returncode != 0:
+        return None
+    match = re.search(r"disksleep\s+(\d+)", result.stdout)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def get_heavy_unexcluded_paths() -> list[Path]:
+    unexcluded: list[Path] = []
+    for candidate in _HEAVY_PATH_CANDIDATES:
+        if not candidate.exists() or candidate.is_symlink():
+            continue
+        result = run_command("tmutil", "isexcluded", str(candidate))
+        if result.returncode == 0 and result.stdout.startswith("[Included]"):
+            unexcluded.append(candidate)
+    return unexcluded
+
+
+@dataclass(frozen=True)
+class UsbConnectionInfo:
+    """USB connection details for a destination drive."""
+
+    hub_depth: int
+    negotiated_speed: int | None  # Device Speed value from ioreg
+    speed_capability: int | None  # bcdUSB value from ioreg (e.g. 0x0300 = USB 3.0)
+
+
+# Device Speed values reported by ioreg
+_USB_SPEED_NAMES: dict[int, str] = {
+    0: "Low Speed (1.5 Mbps)",
+    1: "Full Speed (12 Mbps)",
+    2: "High Speed (480 Mbps / USB 2.0)",
+    3: "SuperSpeed (5 Gbps / USB 3.0)",
+    4: "SuperSpeedPlus (10 Gbps / USB 3.1+)",
+}
+
+# bcdUSB threshold for USB 3.x capability
+_USB3_BCD_MIN = 0x0300  # 768 decimal
+
+
+def _usb_connection_info_from_ioreg(
+    ioreg_output: str, media_name: str
+) -> UsbConnectionInfo | None:
+    """
+    Parse `ioreg -p IOUSB -l -w 0` output to find a device by name.
+
+    Returns hub depth and speed properties, or None if the device cannot
+    be located in the tree.
+    """
+
+    @dataclass
+    class _Node:
+        depth: int
+        name: str
+        product: str | None = None
+        device_speed: int | None = None
+        bcd_usb: int | None = None
+
+    nodes: list[_Node] = []
+    current: _Node | None = None
+
+    for line in ioreg_output.splitlines():
+        # ioreg tree lines can be "  +-o Name" or "  | +-o Name" (branch continuation).
+        # Use [\s|]* to consume both spaces and pipe characters as depth indicators.
+        node_m = re.match(r"^([\s|]*)\+-o\s+(\S+)", line)
+        if node_m:
+            depth = len(node_m.group(1)) // 2
+            name = node_m.group(2).split("@")[0]
+            current = _Node(depth=depth, name=name)
+            nodes.append(current)
+            continue
+        if current is None:
+            continue
+        prod_m = re.search(r'"kUSBProductString"\s*=\s*"([^"]+)"', line)
+        if prod_m:
+            current.product = prod_m.group(1)
+            continue
+        speed_m = re.search(r'"Device Speed"\s*=\s*(\d+)', line)
+        if speed_m:
+            current.device_speed = int(speed_m.group(1))
+            continue
+        bcd_m = re.search(r'"bcdUSB"\s*=\s*(\d+)', line)
+        if bcd_m:
+            current.bcd_usb = int(bcd_m.group(1))
+
+    # Match target device: product string contains the media name or vice-versa,
+    # with common "Media" / "Disk" suffixes stripped.
+    search_name = re.sub(r"\s+(media|disk)$", "", media_name.strip(), flags=re.IGNORECASE).lower()
+    target_idx = None
+    for i, node in enumerate(nodes):
+        product = node.product  # only match nodes that have an actual product string
+        if product is None:
+            continue
+        candidate = product.lower()
+        if search_name in candidate or candidate in search_name:
+            target_idx = i
+            break
+
+    if target_idx is None:
+        return None
+
+    hub_count = 0
+    current_depth = nodes[target_idx].depth
+    for node in reversed(nodes[:target_idx]):
+        if node.depth < current_depth:
+            current_depth = node.depth
+            label = (node.product or node.name).lower()
+            if "hub" in label and "root" not in label and "simulation" not in label:
+                hub_count += 1
+
+    target = nodes[target_idx]
+    return UsbConnectionInfo(
+        hub_depth=hub_count,
+        negotiated_speed=target.device_speed,
+        speed_capability=target.bcd_usb,
+    )
+
+
+def get_destination_usb_info(destination: Destination) -> UsbConnectionInfo | None:
+    """
+    Returns USB connection info for the destination drive.
+    None = not a USB device or could not determine.
+
+    The mount point is typically an APFS volume (e.g. disk7s2), so we must
+    walk up to the physical disk (disk7) to find Protocol and Media Name.
+    """
+    if not destination.mounted or destination.mount_point is None:
+        return None
+
+    vol_di = run_command("diskutil", "info", str(destination.mount_point))
+    if vol_di.returncode != 0:
+        return None
+
+    dev_m = re.search(r"Device Identifier:\s+(disk\d+)", vol_di.stdout)
+    if not dev_m:
+        return None
+    physical_disk = re.sub(r"s\d+$", "", dev_m.group(1))
+
+    phys_di = run_command("diskutil", "info", physical_disk)
+    if phys_di.returncode != 0:
+        return None
+
+    protocol_m = re.search(r"Protocol:\s+(.+)", phys_di.stdout)
+    if not protocol_m or "USB" not in protocol_m.group(1):
+        return None
+
+    media_m = re.search(r"Device / Media Name:\s+(.+)", phys_di.stdout)
+    if not media_m:
+        return None
+    media_name = media_m.group(1).strip()
+
+    ioreg = run_command("ioreg", "-p", "IOUSB", "-l", "-w", "0")
+    if ioreg.returncode != 0:
+        return None
+
+    return _usb_connection_info_from_ioreg(ioreg.stdout, media_name)
+
+
 def collect_report(destination: Destination) -> DoctorReport:
     """Collect all v1 diagnostic information for one destination."""
 
@@ -394,6 +600,11 @@ def collect_report(destination: Destination) -> DoctorReport:
     backups: list[Path] | None = None
     latest_backup: Path | None = None
     transactions: list[TransactionObject] | None = None
+
+    destination_filesystem: str | None = None
+    disk_sleep: int | None = None
+    heavy_unexcluded_paths: list[Path] = []
+    usb_info: UsbConnectionInfo | None = None
 
     if destination.mounted:
         assert destination.mount_point is not None
@@ -406,12 +617,21 @@ def collect_report(destination: Destination) -> DoctorReport:
         ):
             transactions = get_transactions(destination.mount_point)
 
+        destination_filesystem = get_destination_filesystem(destination)
+        disk_sleep = get_disk_sleep_setting()
+        heavy_unexcluded_paths = get_heavy_unexcluded_paths()
+        usb_info = get_destination_usb_info(destination)
+
     return DoctorReport(
         destination=destination,
         backups=backups,
         latest_backup=latest_backup,
         transactions=transactions,
         backup_status=backup_status,
+        destination_filesystem=destination_filesystem,
+        disk_sleep=disk_sleep,
+        heavy_unexcluded_paths=heavy_unexcluded_paths,
+        usb_info=usb_info,
     )
 
 
@@ -444,6 +664,12 @@ def report_to_dict(report: DoctorReport) -> dict[str, Any]:
             }
             for t in report.transactions
         ] if report.transactions is not None else None,
+        "destination_filesystem": report.destination_filesystem,
+        "disk_sleep": report.disk_sleep,
+        "heavy_unexcluded_paths": [str(p) for p in report.heavy_unexcluded_paths],
+        "usb_hub_depth": report.usb_info.hub_depth if report.usb_info else None,
+        "usb_negotiated_speed": report.usb_info.negotiated_speed if report.usb_info else None,
+        "usb_speed_capability": report.usb_info.speed_capability if report.usb_info else None,
     }
 
 
@@ -747,6 +973,60 @@ def render_housekeeping(report: DoctorReport) -> int:
     return 0
 
 
+def render_checks(report: DoctorReport) -> None:
+    """Render a summary panel of all automated checks and their results."""
+    if not report.destination.mounted:
+        return
+
+    lines: list[str] = []
+
+    fs = report.destination_filesystem
+    if fs is None:
+        lines.append("[yellow]?[/yellow]  Drive format: could not determine")
+    elif "APFS" in fs:
+        lines.append(f"[green]✓[/green]  Drive format: {fs}")
+    else:
+        lines.append(f"[red]✗[/red]  Drive format: {fs} (not APFS)")
+
+    if report.disk_sleep is None:
+        lines.append("[yellow]?[/yellow]  Disk sleep: could not determine")
+    elif report.disk_sleep == 0:
+        lines.append("[green]✓[/green]  Disk sleep: disabled")
+    else:
+        lines.append(f"[red]✗[/red]  Disk sleep: enabled ({report.disk_sleep} minute(s))")
+
+    usb = report.usb_info
+    if usb is None:
+        lines.append("[yellow]?[/yellow]  USB connection: not USB or could not determine")
+    else:
+        hub_str = "directly connected" if usb.hub_depth == 0 else f"via {usb.hub_depth} hub(s)"
+        speed_name = _USB_SPEED_NAMES.get(usb.negotiated_speed, f"speed {usb.negotiated_speed}") if usb.negotiated_speed is not None else "unknown speed"
+        is_downgraded = (
+            usb.speed_capability is not None
+            and usb.speed_capability >= _USB3_BCD_MIN
+            and usb.negotiated_speed is not None
+            and usb.negotiated_speed < 3
+        )
+        marker = "[red]✗[/red]" if usb.hub_depth > 0 or is_downgraded else "[green]✓[/green]"
+        lines.append(f"{marker}  USB connection: {hub_str}, {speed_name}")
+
+    if report.heavy_unexcluded_paths:
+        names = ", ".join(p.name for p in report.heavy_unexcluded_paths)
+        lines.append(f"[red]✗[/red]  Unexcluded heavy folders: {names}")
+    else:
+        lines.append("[green]✓[/green]  Heavy folders: none found unexcluded")
+
+    console.print()
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title="Checks",
+            border_style="dim",
+            width=DEFAULT_WIDTH,
+        )
+    )
+
+
 def _interrupted_advice_applies(report: DoctorReport) -> bool:
     if report.destination.kind != "Local":
         return False
@@ -756,7 +1036,87 @@ def _interrupted_advice_applies(report: DoctorReport) -> bool:
     interrupted_16 = states["16"]
     backup_count = len(report.backups) if report.backups is not None else 0
     threshold = max(100, backup_count * 5)
-    return interrupted_16 > threshold
+    if interrupted_16 <= threshold:
+        return False
+    # Suppress the hub/dock advice when we can confirm the drive is directly connected.
+    # If usb_info is None (not USB, or could not determine), show the advice
+    # conservatively. If hub_depth is 0 (directly connected), suppress it.
+    hub_depth = report.usb_info.hub_depth if report.usb_info is not None else None
+    return hub_depth is None or hub_depth > 0
+
+
+def _state16_severe_applies(report: DoctorReport) -> bool:
+    if report.transactions is None:
+        return False
+    _, prev_states = transaction_stats(report.transactions, "previous")
+    _, int_states = transaction_stats(report.transactions, "interrupted")
+    state_16_total = prev_states["16"] + int_states["16"]
+    backup_count = len(report.backups) if report.backups is not None else 0
+    threshold = max(100, backup_count * 5)
+    return state_16_total > threshold
+
+
+def _state16_findings(report: DoctorReport) -> list[str]:
+    """Return actionable finding strings for state-16 causes, or empty list if none."""
+    findings: list[str] = []
+
+    fs = report.destination_filesystem
+    if fs is not None and "APFS" not in fs:
+        findings.append(
+            f"Drive format: Your Time Machine destination is formatted as {fs} "
+            f"(not APFS). On macOS Big Sur and newer, Time Machine requires APFS. "
+            f"The current format causes a legacy sparsebundle wrapper that "
+            f"frequently drops the connection mid-backup. If you have no critical "
+            f"backup history to preserve, reformat the drive as APFS using "
+            f"Disk Utility."
+        )
+
+    if report.disk_sleep is not None and report.disk_sleep > 0:
+        findings.append(
+            f"Hard disk sleep: Your Mac is set to put hard disks to sleep after "
+            f"{report.disk_sleep} minute(s). This can cut power to the backup "
+            f"drive mid-backup. Go to System Settings > Battery (or Energy Saver) "
+            f"> Options and disable 'Put hard disks to sleep when possible'."
+        )
+
+    usb = report.usb_info
+    if (
+        usb is not None
+        and usb.speed_capability is not None
+        and usb.speed_capability >= _USB3_BCD_MIN
+        and usb.negotiated_speed is not None
+        and usb.negotiated_speed < 3
+    ):
+        actual = _USB_SPEED_NAMES.get(usb.negotiated_speed, f"speed {usb.negotiated_speed}")
+        findings.append(
+            f"USB connection speed: The drive is capable of USB 3.0 (5 Gbps) but "
+            f"is currently connected at {actual}. A USB 2.0-only cable or adapter "
+            f"is likely limiting the connection and may cause Time Machine to time "
+            f"out during large backups. Replace it with a USB 3.0-compatible cable "
+            f"or adapter."
+        )
+
+    if report.heavy_unexcluded_paths:
+        home = Path.home()
+        paths_display = "\n".join(
+            "  ~/" + str(p.relative_to(home)) if p.is_relative_to(home) else "  " + str(p)
+            for p in report.heavy_unexcluded_paths
+        )
+        findings.append(
+            f"The following folders were confirmed present on this Mac and are "
+            f"not excluded from Time Machine backups:\n{paths_display}\n"
+            f"These paths change frequently and can cause backup conflicts or "
+            f"interruptions. Run with --add-exclusions to add them automatically, "
+            f"or add them manually in "
+            f"System Settings > General > Time Machine > Options."
+        )
+
+    return findings
+
+
+def _is_monitor_state(report: DoctorReport) -> bool:
+    """True when state-16 is severe but all checked causes appear healthy."""
+    return _state16_severe_applies(report) and not _state16_findings(report)
 
 
 def render_advice(report: DoctorReport) -> None:
@@ -777,31 +1137,99 @@ def render_advice(report: DoctorReport) -> None:
             )
         )
 
+    severe = _state16_severe_applies(report)
+    findings = _state16_findings(report)
 
-def render_overall_status(exit_status: int) -> None:
+    if findings:
+        if severe:
+            preamble = (
+                "A high number of state-16 transaction objects was detected. "
+                "The following conditions are likely contributing:\n\n"
+            )
+        else:
+            preamble = (
+                "The following conditions are known risk factors for Time "
+                "Machine problems and are worth addressing:\n\n"
+            )
+        console.print()
+        console.print(
+            Panel(
+                preamble + "\n\n".join(findings),
+                title="Advice",
+                border_style="blue",
+                width=DEFAULT_WIDTH,
+            )
+        )
+        return
+
+    if severe:
+        console.print()
+        console.print(
+            Panel(
+                "A high number of state-16 transaction objects was detected, "
+                "but the common causes were checked and appear healthy for this "
+                "destination.\n\n"
+                "The accumulation may reflect historical activity from before "
+                "recent configuration changes. Monitor over the next several "
+                "backup cycles to see whether the count decreases.",
+                title="Advice",
+                border_style="blue",
+                width=DEFAULT_WIDTH,
+            )
+        )
+
+
+def apply_exclusions(reports: list[DoctorReport]) -> None:
+    all_paths: list[Path] = []
+    for report in reports:
+        all_paths.extend(report.heavy_unexcluded_paths)
+
+    if not all_paths:
+        console.print()
+        console.print("[green]No unexcluded heavy folders found -- nothing to do.[/green]")
+        return
+
+    console.print()
+    console.print("The following folders will be excluded from Time Machine:")
+    for path in all_paths:
+        console.print(f"  {path}")
+    console.print()
+
+    if not click.confirm("Add these exclusions?", default=False):
+        console.print("Skipped.")
+        return
+
+    for path in all_paths:
+        result = run_command("tmutil", "addexclusion", str(path))
+        if result.returncode == 0:
+            console.print(f"[green]Excluded:[/green] {path}")
+        else:
+            console.print(f"[red]Failed:[/red] {path} -- {result.stderr.strip()}")
+
+
+def render_overall_status(exit_status: int, monitor: bool = False) -> None:
     """Render the overall diagnostic result."""
 
-    if exit_status:
-        console.print(
-            "[bold red]Overall: ATTENTION NEEDED[/bold red]"
-        )
+    if exit_status and monitor:
+        console.print("[bold yellow]Overall: CONTINUE TO MONITOR[/bold yellow]")
+    elif exit_status:
+        console.print("[bold red]Overall: ATTENTION NEEDED[/bold red]")
     else:
         console.print(
-            "[bold green]"
-            "Overall: no severe problems detected"
-            "[/bold green]"
+            "[bold green]Overall: no severe problems detected[/bold green]"
         )
 
 
 @click.command()
 @click.version_option(VERSION)
 @click.option("--json", "output_json", is_flag=True, default=False, help="Output results as JSON.")
-def cli(output_json: bool) -> None:
+@click.option("--add-exclusions", is_flag=True, default=False, help="Prompt to add recommended folders to the Time Machine exclusion list.")
+def cli(output_json: bool, add_exclusions: bool) -> None:
     """
     Inspect a macOS Time Machine destination.
 
-    Version 0.1 performs read-only diagnostics. It does not modify,
-    repair, mount, unmount, or delete anything.
+    By default, performs read-only diagnostics. Pass --add-exclusions to
+    be prompted before adding any recommended folders to the exclusion list.
     """
 
     destinations = get_destinations()
@@ -835,10 +1263,15 @@ def cli(output_json: bool) -> None:
 
         console.print()
 
-    render_overall_status(overall_exit)
+    monitor = overall_exit > 0 and all(_is_monitor_state(r) for r in reports)
+    render_overall_status(overall_exit, monitor=monitor)
 
     for report in reports:
+        render_checks(report)
         render_advice(report)
+
+    if add_exclusions:
+        apply_exclusions(reports)
 
     raise SystemExit(overall_exit)
 

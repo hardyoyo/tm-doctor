@@ -16,11 +16,20 @@ from tm_doctor.cli import (
     Destination,
     DoctorReport,
     TransactionObject,
+    UsbConnectionInfo,
     _interrupted_advice_applies,
+    _state16_findings,
+    _state16_severe_applies,
+    _usb_connection_info_from_ioreg,
+    apply_exclusions,
     collect_report,
     get_backups,
     get_destination,
+    get_destination_filesystem,
+    get_destination_usb_info,
     get_destinations,
+    get_disk_sleep_setting,
+    get_heavy_unexcluded_paths,
     parse_backup_timestamp,
     parse_tmutil_status,
     parse_transaction,
@@ -351,11 +360,19 @@ def test_collect_report_uses_supplied_destination():
         patch("tm_doctor.cli.get_backups") as mock_backups,
         patch("tm_doctor.cli.get_latest_backup") as mock_latest,
         patch("tm_doctor.cli.get_transactions") as mock_tx,
+        patch("tm_doctor.cli.get_destination_filesystem") as mock_fs,
+        patch("tm_doctor.cli.get_disk_sleep_setting") as mock_sleep,
+        patch("tm_doctor.cli.get_heavy_unexcluded_paths") as mock_heavy,
+        patch("tm_doctor.cli.get_destination_usb_info") as mock_usb,
     ):
         mock_status.return_value = BackupStatus(running=False, phase=None, percent=None, time_remaining=None)
         mock_backups.return_value = []
         mock_latest.return_value = None
         mock_tx.return_value = []
+        mock_fs.return_value = "APFS"
+        mock_sleep.return_value = 0
+        mock_heavy.return_value = []
+        mock_usb.return_value = None
 
         report = collect_report(_MOUNTED_DEST)
 
@@ -382,13 +399,14 @@ def test_collect_report_skips_data_collection_when_unmounted():
 _STATUS_IDLE = BackupStatus(running=False, phase=None, percent=None, time_remaining=None)
 
 
-def _make_report(destination=_MOUNTED_DEST, backups=None, latest_backup=None, transactions=None, backup_status=_STATUS_IDLE):
+def _make_report(destination=_MOUNTED_DEST, backups=None, latest_backup=None, transactions=None, backup_status=_STATUS_IDLE, usb_info=None):
     return DoctorReport(
         destination=destination,
         backups=backups,
         latest_backup=latest_backup,
         transactions=transactions,
         backup_status=backup_status,
+        usb_info=usb_info,
     )
 
 
@@ -482,3 +500,512 @@ def test_advice_does_not_apply_below_threshold():
 def test_advice_does_not_apply_no_transactions():
     report = _make_report(destination=_LOCAL_DEST, transactions=None)
     assert _interrupted_advice_applies(report) is False
+
+
+# ---------------------------------------------------------------------------
+# get_destination_filesystem
+# ---------------------------------------------------------------------------
+
+_DISKUTIL_APFS = """\
+/dev/disk4s2
+   Device Identifier:         disk4s2
+   File System Personality:   APFS
+   Type (Bundle):             apfs
+"""
+
+_DISKUTIL_HFS = """\
+/dev/disk3s1
+   Device Identifier:         disk3s1
+   File System Personality:   HFS+
+   Type (Bundle):             hfs
+"""
+
+_MOUNTED_DEST_OBJ = Destination(
+    name="Test", kind="Local", destination_id="X", mount_point=Path("/Volumes/X")
+)
+_UNMOUNTED_DEST_OBJ = Destination(
+    name="Test", kind="Local", destination_id="X", mount_point=None
+)
+
+
+def _completed(returncode, stdout):
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+
+_DISKUTIL_APFS_CASE_SENSITIVE = """\
+/dev/disk4s2
+   Device Identifier:         disk4s2
+   File System Personality:   Case-sensitive APFS
+   Type (Bundle):             apfs
+"""
+
+
+def test_get_destination_filesystem_apfs():
+    with patch("tm_doctor.cli.run_command", return_value=_completed(0, _DISKUTIL_APFS)):
+        assert get_destination_filesystem(_MOUNTED_DEST_OBJ) == "APFS"
+
+
+def test_get_destination_filesystem_case_sensitive_apfs():
+    with patch("tm_doctor.cli.run_command", return_value=_completed(0, _DISKUTIL_APFS_CASE_SENSITIVE)):
+        assert get_destination_filesystem(_MOUNTED_DEST_OBJ) == "Case-sensitive APFS"
+
+
+def test_get_destination_filesystem_hfs():
+    with patch("tm_doctor.cli.run_command", return_value=_completed(0, _DISKUTIL_HFS)):
+        assert get_destination_filesystem(_MOUNTED_DEST_OBJ) == "HFS+"
+
+
+def test_get_destination_filesystem_failure():
+    with patch("tm_doctor.cli.run_command", return_value=_completed(1, "")):
+        assert get_destination_filesystem(_MOUNTED_DEST_OBJ) is None
+
+
+def test_get_destination_filesystem_unmounted():
+    assert get_destination_filesystem(_UNMOUNTED_DEST_OBJ) is None
+
+
+# ---------------------------------------------------------------------------
+# get_disk_sleep_setting
+# ---------------------------------------------------------------------------
+
+_PMSET_SLEEP_ON = """\
+System-wide power settings:
+Currently in use:
+ Sleep On Power Button 1
+ disksleep         10
+ sleep             1
+"""
+
+_PMSET_SLEEP_OFF = """\
+System-wide power settings:
+Currently in use:
+ disksleep         0
+ sleep             1
+"""
+
+
+def test_get_disk_sleep_setting_enabled():
+    with patch("tm_doctor.cli.run_command", return_value=_completed(0, _PMSET_SLEEP_ON)):
+        assert get_disk_sleep_setting() == 10
+
+
+def test_get_disk_sleep_setting_disabled():
+    with patch("tm_doctor.cli.run_command", return_value=_completed(0, _PMSET_SLEEP_OFF)):
+        assert get_disk_sleep_setting() == 0
+
+
+def test_get_disk_sleep_setting_failure():
+    with patch("tm_doctor.cli.run_command", return_value=_completed(1, "")):
+        assert get_disk_sleep_setting() is None
+
+
+# ---------------------------------------------------------------------------
+# get_heavy_unexcluded_paths
+# ---------------------------------------------------------------------------
+
+
+def test_get_heavy_unexcluded_paths_all_excluded():
+    dropbox = Path.home() / "Dropbox"
+    with (
+        patch("tm_doctor.cli._HEAVY_PATH_CANDIDATES", [dropbox]),
+        patch.object(Path, "exists", return_value=True),
+        patch("tm_doctor.cli.run_command", return_value=_completed(0, f"[Excluded]  {dropbox}\n")),
+    ):
+        assert get_heavy_unexcluded_paths() == []
+
+
+def test_get_heavy_unexcluded_paths_some_not_excluded():
+    dropbox = Path.home() / "Dropbox"
+    with (
+        patch("tm_doctor.cli._HEAVY_PATH_CANDIDATES", [dropbox]),
+        patch.object(Path, "exists", return_value=True),
+        patch("tm_doctor.cli.run_command", return_value=_completed(0, f"[Included]  {dropbox}\n")),
+    ):
+        result = get_heavy_unexcluded_paths()
+        assert result == [dropbox]
+
+
+def test_get_heavy_unexcluded_paths_nonexistent_skipped():
+    dropbox = Path.home() / "Dropbox"
+    with (
+        patch("tm_doctor.cli._HEAVY_PATH_CANDIDATES", [dropbox]),
+        patch.object(Path, "exists", return_value=False),
+    ):
+        assert get_heavy_unexcluded_paths() == []
+
+
+def test_get_heavy_unexcluded_paths_symlink_skipped():
+    google_drive = Path.home() / "Google Drive"
+    with (
+        patch("tm_doctor.cli._HEAVY_PATH_CANDIDATES", [google_drive]),
+        patch.object(Path, "exists", return_value=True),
+        patch.object(Path, "is_symlink", return_value=True),
+    ):
+        assert get_heavy_unexcluded_paths() == []
+
+
+# ---------------------------------------------------------------------------
+# _state16_severe_applies
+# ---------------------------------------------------------------------------
+
+
+def _report_with_state16(previous_count, interrupted_count, backup_count):
+    txs = (
+        [_tx("previous", "16") for _ in range(previous_count)]
+        + [_tx("interrupted", "16") for _ in range(interrupted_count)]
+    )
+    backups = [Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, backup_count + 1)]
+    return _make_report(transactions=txs, backups=backups)
+
+
+def test_state16_severe_applies_above_threshold():
+    report = _report_with_state16(previous_count=80, interrupted_count=80, backup_count=20)
+    assert _state16_severe_applies(report) is True
+
+
+def test_state16_severe_does_not_apply_below_threshold():
+    report = _report_with_state16(previous_count=30, interrupted_count=30, backup_count=20)
+    assert _state16_severe_applies(report) is False
+
+
+def test_state16_severe_does_not_apply_no_transactions():
+    report = _make_report(transactions=None)
+    assert _state16_severe_applies(report) is False
+
+
+# ---------------------------------------------------------------------------
+# apply_exclusions
+# ---------------------------------------------------------------------------
+
+
+def _report_with_heavy_paths(paths):
+    return DoctorReport(
+        destination=_MOUNTED_DEST,
+        backups=None,
+        latest_backup=None,
+        transactions=None,
+        backup_status=_STATUS_IDLE,
+        heavy_unexcluded_paths=paths,
+    )
+
+
+def test_apply_exclusions_nothing_to_do(capsys):
+    apply_exclusions([_make_report()])
+    captured = capsys.readouterr()
+    assert "nothing to do" in captured.out
+
+
+def test_apply_exclusions_user_confirms():
+    dropbox = Path.home() / "Dropbox"
+    report = _report_with_heavy_paths([dropbox])
+    with (
+        patch("click.confirm", return_value=True),
+        patch("tm_doctor.cli.run_command", return_value=_completed(0, "")) as mock_cmd,
+    ):
+        apply_exclusions([report])
+
+    mock_cmd.assert_called_once_with("tmutil", "addexclusion", str(dropbox))
+
+
+def test_apply_exclusions_user_declines(capsys):
+    dropbox = Path.home() / "Dropbox"
+    report = _report_with_heavy_paths([dropbox])
+    with (
+        patch("click.confirm", return_value=False),
+        patch("tm_doctor.cli.run_command") as mock_cmd,
+    ):
+        apply_exclusions([report])
+
+    mock_cmd.assert_not_called()
+
+
+def test_apply_exclusions_command_failure(capsys):
+    dropbox = Path.home() / "Dropbox"
+    report = _report_with_heavy_paths([dropbox])
+    with (
+        patch("click.confirm", return_value=True),
+        patch("tm_doctor.cli.run_command", return_value=_completed(1, "")),
+    ):
+        apply_exclusions([report])
+
+    captured = capsys.readouterr()
+    assert "Failed" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# _usb_hub_depth_from_ioreg
+# ---------------------------------------------------------------------------
+
+_IOREG_DIRECT = """\
++-o Root  <class IORegistryEntry>
+  +-o AppleUSBXHCI@14000000  <class AppleUSBXHCI>
+    +-o Root Hub Simulation@14000000  <class IOUSBRootHubDevice>
+      +-o HS01@14100000  <class IOUSBHostDevice>
+      | +-o HD-PGF@14100000  <class IOUSBHostDevice>
+      |   | {
+      |   |   "kUSBProductString" = "HD-PGF"
+      |   |   "Device Speed" = 3
+      |   |   "bcdUSB" = 768
+      |   | }
+"""
+
+_IOREG_DIRECT_USB2 = """\
++-o Root  <class IORegistryEntry>
+  +-o AppleUSBXHCI@14000000  <class AppleUSBXHCI>
+    +-o Root Hub Simulation@14000000  <class IOUSBRootHubDevice>
+      +-o HS01@14100000  <class IOUSBHostDevice>
+      | +-o HD-PGF@14100000  <class IOUSBHostDevice>
+      |   | {
+      |   |   "kUSBProductString" = "HD-PGF"
+      |   |   "Device Speed" = 2
+      |   |   "bcdUSB" = 768
+      |   | }
+"""
+
+_IOREG_BEHIND_HUB = """\
++-o Root  <class IORegistryEntry>
+  +-o AppleUSBXHCI@14000000  <class AppleUSBXHCI>
+    +-o Root Hub Simulation@14000000  <class IOUSBRootHubDevice>
+      +-o HS08@14800000  <class IOUSBHostDevice>
+        +-o USB5807 Hub@14800000  <class IOUSBHostDevice>
+        | | {
+        | |   "kUSBProductString" = "USB5807 Hub"
+        | | }
+        | +-o HD-PGF@14810000  <class IOUSBHostDevice>
+        |   | {
+        |   |   "kUSBProductString" = "HD-PGF"
+        |   | }
+"""
+
+_IOREG_BEHIND_TWO_HUBS = """\
++-o Root  <class IORegistryEntry>
+  +-o AppleUSBXHCI@14000000  <class AppleUSBXHCI>
+    +-o Root Hub Simulation@14000000  <class IOUSBRootHubDevice>
+      +-o HS08@14800000  <class IOUSBHostDevice>
+        +-o USB5807 Hub@14800000  <class IOUSBHostDevice>
+        | | {
+        | |   "kUSBProductString" = "USB5807 Hub"
+        | | }
+        | +-o USB2807 Hub@14810000  <class IOUSBHostDevice>
+        |   | {
+        |   |   "kUSBProductString" = "USB2807 Hub"
+        |   | }
+        |   +-o HD-PGF@14811000  <class IOUSBHostDevice>
+        |     | {
+        |     |   "kUSBProductString" = "HD-PGF"
+        |     | }
+"""
+
+
+def test_usb_hub_depth_direct():
+    result = _usb_connection_info_from_ioreg(_IOREG_DIRECT, "HD-PGF Media")
+    assert result is not None
+    assert result.hub_depth == 0
+
+
+def test_usb_hub_depth_behind_one_hub():
+    result = _usb_connection_info_from_ioreg(_IOREG_BEHIND_HUB, "HD-PGF Media")
+    assert result is not None
+    assert result.hub_depth == 1
+
+
+def test_usb_hub_depth_behind_two_hubs():
+    result = _usb_connection_info_from_ioreg(_IOREG_BEHIND_TWO_HUBS, "HD-PGF Media")
+    assert result is not None
+    assert result.hub_depth == 2
+
+
+def test_usb_hub_depth_device_not_found():
+    assert _usb_connection_info_from_ioreg(_IOREG_DIRECT, "Some Other Drive") is None
+
+
+def test_usb_connection_info_captures_speed_properties():
+    result = _usb_connection_info_from_ioreg(_IOREG_DIRECT, "HD-PGF Media")
+    assert result is not None
+    assert result.negotiated_speed == 3
+    assert result.speed_capability == 768
+
+
+def test_usb_connection_info_captures_downgraded_speed():
+    result = _usb_connection_info_from_ioreg(_IOREG_DIRECT_USB2, "HD-PGF Media")
+    assert result is not None
+    assert result.negotiated_speed == 2
+    assert result.speed_capability == 768
+
+
+# ---------------------------------------------------------------------------
+# get_destination_usb_hub_depth
+# ---------------------------------------------------------------------------
+
+_DISKUTIL_VOLUME = """\
+   Device Identifier:         disk7s2
+   Volume Name:               HJPtimeMachine2
+"""
+
+_DISKUTIL_USB = """\
+   Device Identifier:         disk7
+   Device / Media Name:       HD-PGF
+   Protocol:                  USB
+"""
+
+_DISKUTIL_THUNDERBOLT = """\
+   Device Identifier:         disk7
+   Device / Media Name:       My Drive
+   Protocol:                  Thunderbolt
+"""
+
+
+def test_get_destination_usb_info_direct():
+    with patch("tm_doctor.cli.run_command") as mock_cmd:
+        mock_cmd.side_effect = [
+            _completed(0, _DISKUTIL_VOLUME),
+            _completed(0, _DISKUTIL_USB),
+            _completed(0, _IOREG_DIRECT),
+        ]
+        result = get_destination_usb_info(_MOUNTED_DEST_OBJ)
+    assert result is not None
+    assert result.hub_depth == 0
+
+
+def test_get_destination_usb_info_behind_hub():
+    with patch("tm_doctor.cli.run_command") as mock_cmd:
+        mock_cmd.side_effect = [
+            _completed(0, _DISKUTIL_VOLUME),
+            _completed(0, _DISKUTIL_USB),
+            _completed(0, _IOREG_BEHIND_HUB),
+        ]
+        result = get_destination_usb_info(_MOUNTED_DEST_OBJ)
+    assert result is not None
+    assert result.hub_depth == 1
+
+
+def test_get_destination_usb_info_not_usb():
+    with patch("tm_doctor.cli.run_command") as mock_cmd:
+        mock_cmd.side_effect = [
+            _completed(0, _DISKUTIL_VOLUME),
+            _completed(0, _DISKUTIL_THUNDERBOLT),
+        ]
+        result = get_destination_usb_info(_MOUNTED_DEST_OBJ)
+    assert result is None
+
+
+def test_get_destination_usb_info_unmounted():
+    assert get_destination_usb_info(_UNMOUNTED_DEST_OBJ) is None
+
+
+# ---------------------------------------------------------------------------
+# _interrupted_advice_applies respects usb_hub_depth
+# ---------------------------------------------------------------------------
+
+
+def _report_with_hub_depth(hub_depth):
+    txs = [_tx("interrupted", "16") for _ in range(150)]
+    backups = [Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, 21)]
+    usb_info = UsbConnectionInfo(hub_depth=hub_depth, negotiated_speed=3, speed_capability=0x0300) if hub_depth is not None else None
+    return DoctorReport(
+        destination=_LOCAL_DEST,
+        backups=backups,
+        latest_backup=None,
+        transactions=txs,
+        backup_status=_STATUS_IDLE,
+        usb_info=usb_info,
+    )
+
+
+def test_advice_suppressed_when_directly_connected():
+    report = _report_with_hub_depth(hub_depth=0)
+    assert _interrupted_advice_applies(report) is False
+
+
+def test_advice_shown_when_behind_hub():
+    report = _report_with_hub_depth(hub_depth=1)
+    assert _interrupted_advice_applies(report) is True
+
+
+def test_advice_shown_when_hub_depth_unknown():
+    report = _make_report(destination=_LOCAL_DEST, transactions=[_tx("interrupted", "16") for _ in range(150)],
+                          backups=[Path(f"/Volumes/TM/2024-01-{i:02d}-060000.backup") for i in range(1, 21)])
+    assert _interrupted_advice_applies(report) is True
+
+
+# ---------------------------------------------------------------------------
+# _state16_findings always fires when checks fail, regardless of state-16
+# ---------------------------------------------------------------------------
+
+
+def test_findings_disk_sleep_without_severe_state16():
+    """Disk sleep finding is raised even on a healthy (non-severe) destination."""
+    report = DoctorReport(
+        destination=_MOUNTED_DEST,
+        backups=[],
+        latest_backup=None,
+        transactions=[],
+        backup_status=_STATUS_IDLE,
+        disk_sleep=10,
+    )
+    assert not _state16_severe_applies(report)
+    findings = _state16_findings(report)
+    assert any("disk sleep" in f.lower() for f in findings)
+
+
+def test_findings_non_apfs_without_severe_state16():
+    """Drive format finding is raised even on a healthy destination."""
+    report = DoctorReport(
+        destination=_MOUNTED_DEST,
+        backups=[],
+        latest_backup=None,
+        transactions=[],
+        backup_status=_STATUS_IDLE,
+        destination_filesystem="HFS+",
+    )
+    assert not _state16_severe_applies(report)
+    findings = _state16_findings(report)
+    assert any("HFS+" in f for f in findings)
+
+
+def test_findings_usb_speed_downgrade_without_severe_state16():
+    """USB speed downgrade finding is raised even on a healthy destination."""
+    usb = UsbConnectionInfo(hub_depth=0, negotiated_speed=2, speed_capability=0x0300)
+    report = DoctorReport(
+        destination=_MOUNTED_DEST,
+        backups=[],
+        latest_backup=None,
+        transactions=[],
+        backup_status=_STATUS_IDLE,
+        usb_info=usb,
+    )
+    assert not _state16_severe_applies(report)
+    findings = _state16_findings(report)
+    assert any("USB" in f for f in findings)
+
+
+def test_findings_heavy_paths_without_severe_state16():
+    """Heavy unexcluded folder finding is raised even on a healthy destination."""
+    report = DoctorReport(
+        destination=_MOUNTED_DEST,
+        backups=[],
+        latest_backup=None,
+        transactions=[],
+        backup_status=_STATUS_IDLE,
+        heavy_unexcluded_paths=[Path.home() / ".npm"],
+    )
+    assert not _state16_severe_applies(report)
+    findings = _state16_findings(report)
+    assert findings
+
+
+def test_no_findings_when_all_checks_pass():
+    """No findings when everything looks healthy."""
+    usb = UsbConnectionInfo(hub_depth=0, negotiated_speed=3, speed_capability=0x0300)
+    report = DoctorReport(
+        destination=_MOUNTED_DEST,
+        backups=[],
+        latest_backup=None,
+        transactions=[],
+        backup_status=_STATUS_IDLE,
+        destination_filesystem="APFS",
+        disk_sleep=0,
+        usb_info=usb,
+        heavy_unexcluded_paths=[],
+    )
+    assert _state16_findings(report) == []
