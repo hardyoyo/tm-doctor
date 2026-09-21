@@ -133,10 +133,12 @@ macOS tools used include:
 - `tmutil`
 - `plutil`
 - `xattr`
+- `diskutil`
+- `pmset`
+- `ioreg`
 
 Future functionality may also use:
 
-- `diskutil`
 - `fsck_apfs`
 - `mount_apfs`
 - `rsync`
