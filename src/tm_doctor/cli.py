@@ -27,9 +27,7 @@ TRANSACTION_PATTERN = re.compile(
     r"\.(?P<kind>previous|interrupted)$"
 )
 
-BACKUP_PATTERN = re.compile(
-    r"(?P<timestamp>\d{4}-\d{2}-\d{2}-\d{6})\.backup$"
-)
+BACKUP_PATTERN = re.compile(r"(?P<timestamp>\d{4}-\d{2}-\d{2}-\d{6})\.backup$")
 
 DEFAULT_WIDTH = 78
 
@@ -83,7 +81,7 @@ class DoctorReport:
     destination_filesystem: str | None = None
     disk_sleep: int | None = None
     heavy_unexcluded_paths: list[Path] = field(default_factory=list)
-    usb_info: "UsbConnectionInfo | None" = None
+    usb_info: UsbConnectionInfo | None = None
 
 
 def run_command(
@@ -121,8 +119,7 @@ def get_destinations() -> list[Destination]:
 
     if result.returncode != 0:
         raise click.ClickException(
-            "Unable to query Time Machine destination:\n"
-            f"{result.stderr.strip()}"
+            f"Unable to query Time Machine destination:\n{result.stderr.strip()}"
         )
 
     destinations: list[Destination] = []
@@ -157,8 +154,7 @@ def get_destination() -> Destination:
 
     if result.returncode != 0:
         raise click.ClickException(
-            "Unable to query Time Machine destination:\n"
-            f"{result.stderr.strip()}"
+            f"Unable to query Time Machine destination:\n{result.stderr.strip()}"
         )
 
     values: dict[str, str] = {}
@@ -174,9 +170,7 @@ def get_destination() -> Destination:
     destination_id = values.get("ID")
 
     if not destination_id:
-        raise click.ClickException(
-            "No configured Time Machine destination was found."
-        )
+        raise click.ClickException("No configured Time Machine destination was found.")
 
     mount_point = values.get("Mount Point")
 
@@ -201,11 +195,7 @@ def get_backups() -> list[Path] | None:
     if result.returncode != 0:
         return None
 
-    return [
-        Path(line.strip())
-        for line in result.stdout.splitlines()
-        if line.strip()
-    ]
+    return [Path(line.strip()) for line in result.stdout.splitlines() if line.strip()]
 
 
 def get_latest_backup() -> Path | None:
@@ -291,10 +281,7 @@ def get_transactions(
             # Avoid is_dir(), stat(), and other unnecessary metadata calls.
             # A degraded Time Machine destination can contain thousands of
             # transaction objects, making metadata-heavy enumeration costly.
-            if not (
-                path.name.endswith(".previous")
-                or path.name.endswith(".interrupted")
-            ):
+            if not (path.name.endswith(".previous") or path.name.endswith(".interrupted")):
                 continue
 
             transaction = parse_transaction(path)
@@ -303,9 +290,7 @@ def get_transactions(
                 transactions.append(transaction)
 
     except OSError as exc:
-        raise click.ClickException(
-            f"Unable to inspect {destination}: {exc}"
-        ) from exc
+        raise click.ClickException(f"Unable to inspect {destination}: {exc}") from exc
 
     return sorted(
         transactions,
@@ -612,9 +597,7 @@ def collect_report(destination: Destination) -> DoctorReport:
         backups = get_backups()
         latest_backup = get_latest_backup()
 
-        with console.status(
-            "[bold]Inspecting Time Machine housekeeping metadata...[/bold]"
-        ):
+        with console.status("[bold]Inspecting Time Machine housekeeping metadata...[/bold]"):
             transactions = get_transactions(destination.mount_point)
 
         destination_filesystem = get_destination_filesystem(destination)
@@ -663,7 +646,9 @@ def report_to_dict(report: DoctorReport) -> dict[str, Any]:
                 "snapshot_state": t.snapshot_state,
             }
             for t in report.transactions
-        ] if report.transactions is not None else None,
+        ]
+        if report.transactions is not None
+        else None,
         "destination_filesystem": report.destination_filesystem,
         "disk_sleep": report.disk_sleep,
         "heavy_unexcluded_paths": [str(p) for p in report.heavy_unexcluded_paths],
@@ -756,9 +741,7 @@ def render_backup_status(status: BackupStatus) -> None:
     """Render current backup activity."""
 
     if not status.running:
-        console.print(
-            "[green]✓[/green] No backup currently running."
-        )
+        console.print("[green]✓[/green] No backup currently running.")
         console.print()
         return
 
@@ -797,16 +780,10 @@ def render_backup_status(status: BackupStatus) -> None:
             progress.refresh()
 
         if status.time_remaining is not None:
-            console.print(
-                f"  ETA: {format_duration(status.time_remaining)}"
-            )
+            console.print(f"  ETA: {format_duration(status.time_remaining)}")
 
     elif phase == "ThinningPostBackup":
-        console.print(
-            "  [yellow]"
-            "Post-backup housekeeping is in progress."
-            "[/yellow]"
-        )
+        console.print("  [yellow]Post-backup housekeeping is in progress.[/yellow]")
 
     console.print()
 
@@ -817,15 +794,10 @@ def transaction_stats(
 ) -> tuple[list[TransactionObject], Counter[str]]:
     """Return transactions and state counts for one type."""
 
-    selected = [
-        transaction
-        for transaction in transactions
-        if transaction.kind == kind
-    ]
+    selected = [transaction for transaction in transactions if transaction.kind == kind]
 
     states: Counter[str] = Counter(
-        transaction.snapshot_state or "unknown"
-        for transaction in selected
+        transaction.snapshot_state or "unknown" for transaction in selected
     )
 
     return selected, states
@@ -904,11 +876,7 @@ def render_housekeeping(report: DoctorReport) -> int:
     console.print(table)
     console.print()
 
-    backup_count = (
-        len(report.backups)
-        if report.backups is not None
-        else 0
-    )
+    backup_count = len(report.backups) if report.backups is not None else 0
 
     severe_threshold = max(
         100,
@@ -1000,7 +968,11 @@ def render_checks(report: DoctorReport) -> None:
         lines.append("[yellow]?[/yellow]  USB connection: not USB or could not determine")
     else:
         hub_str = "directly connected" if usb.hub_depth == 0 else f"via {usb.hub_depth} hub(s)"
-        speed_name = _USB_SPEED_NAMES.get(usb.negotiated_speed, f"speed {usb.negotiated_speed}") if usb.negotiated_speed is not None else "unknown speed"
+        speed_name = (
+            _USB_SPEED_NAMES.get(usb.negotiated_speed, f"speed {usb.negotiated_speed}")
+            if usb.negotiated_speed is not None
+            else "unknown speed"
+        )
         is_downgraded = (
             usb.speed_capability is not None
             and usb.speed_capability >= _USB3_BCD_MIN
@@ -1215,15 +1187,18 @@ def render_overall_status(exit_status: int, monitor: bool = False) -> None:
     elif exit_status:
         console.print("[bold red]Overall: ATTENTION NEEDED[/bold red]")
     else:
-        console.print(
-            "[bold green]Overall: no severe problems detected[/bold green]"
-        )
+        console.print("[bold green]Overall: no severe problems detected[/bold green]")
 
 
 @click.command()
 @click.version_option(VERSION)
 @click.option("--json", "output_json", is_flag=True, default=False, help="Output results as JSON.")
-@click.option("--add-exclusions", is_flag=True, default=False, help="Prompt to add recommended folders to the Time Machine exclusion list.")
+@click.option(
+    "--add-exclusions",
+    is_flag=True,
+    default=False,
+    help="Prompt to add recommended folders to the Time Machine exclusion list.",
+)
 def cli(output_json: bool, add_exclusions: bool) -> None:
     """
     Inspect a macOS Time Machine destination.
@@ -1244,10 +1219,7 @@ def cli(output_json: bool, add_exclusions: bool) -> None:
         raise SystemExit(0)
 
     console.print()
-    console.print(
-        "[bold blue]Time Machine Doctor[/bold blue] "
-        f"[dim]v{VERSION}[/dim]"
-    )
+    console.print(f"[bold blue]Time Machine Doctor[/bold blue] [dim]v{VERSION}[/dim]")
     console.print()
 
     reports = [collect_report(dest) for dest in destinations]
