@@ -92,5 +92,7 @@ Unscheduled -- not committed to any version:
 - [ ] Historical snapshot browser (`tm-doctor snapshots`)
 - [ ] Multiple destination rotation health (are all destinations up to date?)
 - [ ] Backup size trending over time
-- [ ] `tm-doctor --watch` live status (poll tmutil status)
+- [x] `tm-doctor watch` live status (poll tmutil status)
+- [ ] `tm-doctor diff` -- compare two most recent backups via `tmutil compare`,
+      surface what changed (useful for diagnosing why large backups keep recurring)
 - [ ] Restore from a specific historical backup (not just latest)
