@@ -1479,7 +1479,10 @@ def repair(strip_acls: bool, dry_run: bool, yes: bool) -> None:
     console.print()
 
     if dry_run:
-        console.print(f"[dim]Dry run complete. {len(state16):,} objects would be processed.[/dim]")
+        console.print(
+            f"[dim]Dry run complete. {len(state16):,} objects would be processed.[/dim]\n\n"
+            "To apply: [bold]sudo tm-doctor repair --strip-acls[/bold]"
+        )
         return
 
     if fail_count == 0:
