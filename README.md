@@ -25,9 +25,6 @@ observable and testable.
 
 Early development.
 
-Version 0.1 performs read-only diagnostics only. It does not modify, repair,
-mount, unmount, or delete anything.
-
 Current diagnostics include:
 
 - Time Machine destination discovery
@@ -38,6 +35,18 @@ Current diagnostics include:
 - `.previous` and `.interrupted` transaction-object analysis
 - `com.apple.backupd.SnapshotState` distribution
 - detection of unusually large housekeeping backlogs
+- drive format, disk sleep, USB connection, and heavy-folder checks
+- live backup progress (`tm-doctor watch`)
+
+Repair operations (explicit, require root):
+
+- `tm-doctor repair --strip-acls` — strips the `sunlnk` flag and
+  `group:everyone deny delete` ACL from state-16 transaction objects so
+  Time Machine can delete them during `ThinningPostBackup`
+- `tm-doctor repair --delete` — strips protections and forcibly deletes
+  state-16 transaction objects directly; use when `ThinningPostBackup`
+  does not retry previously failed objects after protections are removed
+- `--dry-run` on either repair command previews scope without modifying anything
 
 Future work is expected to include:
 
@@ -45,7 +54,6 @@ Future work is expected to include:
 - historical snapshot browsing
 - restore testing
 - verified restores using read-only APFS snapshots and `rsync`
-- JSON output
 - improved health assessments
 
 ## Installation
@@ -100,8 +108,10 @@ Time Machine Doctor v0.1.0
 
 Backup software deserves an unusually conservative approach.
 
-The default behavior of `tm-doctor` should be read-only. Diagnostic commands
-must not silently modify a Time Machine destination.
+The default behavior of `tm-doctor` is read-only. Diagnostic commands must
+not silently modify a Time Machine destination. Repair operations are
+explicit subcommands that require root and user confirmation before touching
+anything.
 
 In particular:
 
