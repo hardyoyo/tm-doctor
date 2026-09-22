@@ -84,6 +84,7 @@ class DoctorReport:
     disk_sleep: int | None = None
     heavy_unexcluded_paths: list[Path] = field(default_factory=list)
     usb_info: UsbConnectionInfo | None = None
+    spotlight_indexed: bool | None = None
 
 
 def run_command(
@@ -431,6 +432,20 @@ def get_disk_sleep_setting() -> int | None:
     return None
 
 
+def get_destination_spotlight_indexed(destination: Destination) -> bool | None:
+    if not destination.mounted or destination.mount_point is None:
+        return None
+    result = run_command("mdutil", "-s", str(destination.mount_point))
+    if result.returncode != 0:
+        return None
+    text = result.stdout.lower()
+    if "indexing enabled" in text:
+        return True
+    if "indexing disabled" in text:
+        return False
+    return None
+
+
 def get_heavy_unexcluded_paths() -> list[Path]:
     unexcluded: list[Path] = []
     for candidate in _HEAVY_PATH_CANDIDATES:
@@ -595,6 +610,7 @@ def collect_report(destination: Destination) -> DoctorReport:
     disk_sleep: int | None = None
     heavy_unexcluded_paths: list[Path] = []
     usb_info: UsbConnectionInfo | None = None
+    spotlight_indexed: bool | None = None
 
     if destination.mounted:
         assert destination.mount_point is not None
@@ -609,6 +625,7 @@ def collect_report(destination: Destination) -> DoctorReport:
         disk_sleep = get_disk_sleep_setting()
         heavy_unexcluded_paths = get_heavy_unexcluded_paths()
         usb_info = get_destination_usb_info(destination)
+        spotlight_indexed = get_destination_spotlight_indexed(destination)
 
     return DoctorReport(
         destination=destination,
@@ -620,6 +637,7 @@ def collect_report(destination: Destination) -> DoctorReport:
         disk_sleep=disk_sleep,
         heavy_unexcluded_paths=heavy_unexcluded_paths,
         usb_info=usb_info,
+        spotlight_indexed=spotlight_indexed,
     )
 
 
@@ -660,6 +678,7 @@ def report_to_dict(report: DoctorReport) -> dict[str, Any]:
         "usb_hub_depth": report.usb_info.hub_depth if report.usb_info else None,
         "usb_negotiated_speed": report.usb_info.negotiated_speed if report.usb_info else None,
         "usb_speed_capability": report.usb_info.speed_capability if report.usb_info else None,
+        "spotlight_indexed": report.spotlight_indexed,
     }
 
 
@@ -987,6 +1006,13 @@ def render_checks(report: DoctorReport) -> None:
         marker = "[red]✗[/red]" if usb.hub_depth > 0 or is_downgraded else "[green]✓[/green]"
         lines.append(f"{marker}  USB connection: {hub_str}, {speed_name}")
 
+    if report.spotlight_indexed is None:
+        lines.append("[yellow]?[/yellow]  Spotlight indexing: could not determine")
+    elif report.spotlight_indexed:
+        lines.append("[red]✗[/red]  Spotlight indexing: enabled on backup volume")
+    else:
+        lines.append("[green]✓[/green]  Spotlight indexing: disabled on backup volume")
+
     if report.heavy_unexcluded_paths:
         names = ", ".join(p.name for p in report.heavy_unexcluded_paths)
         lines.append(f"[red]✗[/red]  Unexcluded heavy folders: {names}")
@@ -1086,6 +1112,18 @@ def _state16_findings(report: DoctorReport) -> list[str]:
             f"interruptions. Run with --add-exclusions to add them automatically, "
             f"or add them manually in "
             f"System Settings > General > Time Machine > Options."
+        )
+
+    if report.spotlight_indexed is True:
+        mount = str(report.destination.mount_point)
+        findings.append(
+            "Spotlight indexing: Spotlight is currently indexing the Time Machine "
+            "destination volume. This can cause mdworker to hold file handles on "
+            "backup transaction objects, preventing Time Machine from deleting them "
+            "during ThinningPostBackup (afpAccessDenied errors). To disable indexing "
+            f"on this volume, run:\n\n    sudo mdutil -i off {mount}\n\n"
+            "Or add the volume manually via System Settings > Siri & Spotlight > "
+            "Spotlight Privacy."
         )
 
     return findings

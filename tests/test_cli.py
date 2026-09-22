@@ -27,6 +27,7 @@ from tm_doctor.cli import (
     get_backups,
     get_destination,
     get_destination_filesystem,
+    get_destination_spotlight_indexed,
     get_destination_usb_info,
     get_destinations,
     get_disk_sleep_setting,
@@ -1042,5 +1043,67 @@ def test_no_findings_when_all_checks_pass():
         disk_sleep=0,
         usb_info=usb,
         heavy_unexcluded_paths=[],
+        spotlight_indexed=False,
     )
     assert _state16_findings(report) == []
+
+
+# ---------------------------------------------------------------------------
+# get_destination_spotlight_indexed
+# ---------------------------------------------------------------------------
+
+
+def test_get_destination_spotlight_indexed_enabled():
+    with patch(
+        "tm_doctor.cli.run_command",
+        return_value=_completed(0, "/Volumes/TM: Indexing enabled.\n"),
+    ):
+        result = get_destination_spotlight_indexed(_MOUNTED_DEST)
+    assert result is True
+
+
+def test_get_destination_spotlight_indexed_disabled():
+    with patch(
+        "tm_doctor.cli.run_command",
+        return_value=_completed(
+            0,
+            "/Volumes/TM: Indexing disabled. (Excluded from Spotlight index)\n",
+        ),
+    ):
+        result = get_destination_spotlight_indexed(_MOUNTED_DEST)
+    assert result is False
+
+
+def test_get_destination_spotlight_indexed_failure():
+    with patch("tm_doctor.cli.run_command", return_value=_completed(1, "")):
+        result = get_destination_spotlight_indexed(_MOUNTED_DEST)
+    assert result is None
+
+
+def test_get_destination_spotlight_indexed_not_mounted():
+    unmounted = Destination(
+        name="Test Drive",
+        kind="Local",
+        destination_id="TEST-0001",
+        mount_point=None,
+    )
+    with patch("tm_doctor.cli.run_command") as mock_cmd:
+        result = get_destination_spotlight_indexed(unmounted)
+    assert result is None
+    mock_cmd.assert_not_called()
+
+
+def test_findings_spotlight_indexed_without_severe_state16():
+    """Spotlight finding is raised even when state-16 is not severe."""
+    report = DoctorReport(
+        destination=_MOUNTED_DEST,
+        backups=[],
+        latest_backup=None,
+        transactions=[],
+        backup_status=_STATUS_IDLE,
+        spotlight_indexed=True,
+    )
+    assert not _state16_severe_applies(report)
+    findings = _state16_findings(report)
+    assert any("Spotlight" in f for f in findings)
+    assert any("mdutil" in f for f in findings)
