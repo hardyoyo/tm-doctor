@@ -1347,6 +1347,31 @@ def _strip_transaction_protections(path: Path, dry_run: bool) -> tuple[bool, str
     return True, None
 
 
+def _delete_transaction_object(path: Path, dry_run: bool) -> tuple[bool, str | None]:
+    """Strip protections and forcibly delete a state-16 transaction object.
+
+    Returns (success, error_message).
+    """
+    if dry_run:
+        return True, None
+
+    ok, err = _strip_transaction_protections(path, dry_run=False)
+    if not ok:
+        return False, f"strip failed: {err}"
+
+    result = subprocess.run(
+        ["rm", "-rf", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        return False, result.stderr.strip() or "rm -rf failed"
+
+    return True, None
+
+
 @cli.command()
 @click.option(
     "--strip-acls",
@@ -1354,6 +1379,13 @@ def _strip_transaction_protections(path: Path, dry_run: bool) -> tuple[bool, str
     is_flag=True,
     default=False,
     help="Strip sunlnk flags and deny-delete ACLs from state-16 transaction objects.",
+)
+@click.option(
+    "--delete",
+    "delete",
+    is_flag=True,
+    default=False,
+    help="Strip protections and forcibly delete state-16 transaction objects.",
 )
 @click.option(
     "--dry-run",
@@ -1368,13 +1400,16 @@ def _strip_transaction_protections(path: Path, dry_run: bool) -> tuple[bool, str
     default=False,
     help="Skip the confirmation prompt.",
 )
-def repair(strip_acls: bool, dry_run: bool, yes: bool) -> None:
+def repair(strip_acls: bool, delete: bool, dry_run: bool, yes: bool) -> None:
     """Explicit repair operations for a Time Machine destination.
 
     Must be run as root (sudo tm-doctor repair ...).
     """
-    if not strip_acls:
-        raise click.UsageError("Specify a repair operation. Currently available: --strip-acls")
+    if not strip_acls and not delete:
+        raise click.UsageError("Specify a repair operation. Available: --strip-acls, --delete")
+
+    if strip_acls and delete:
+        raise click.UsageError("--strip-acls and --delete are mutually exclusive.")
 
     destinations = get_destinations()
     mounted = [d for d in destinations if d.mounted]
@@ -1432,20 +1467,32 @@ def repair(strip_acls: bool, dry_run: bool, yes: bool) -> None:
         "\n\n[bold yellow]Dry run -- no changes will be made.[/bold yellow]" if dry_run else ""
     )
 
-    console.print()
-    console.print(
-        Panel(
+    if delete:
+        action_desc = (
+            f"This command will strip protections and [bold red]permanently delete[/bold red] "
+            f"state-16 transaction objects\n"
+            f"on [bold]{destination.name}[/bold] ({destination.mount_point}).\n\n"
+            f"This bypasses Time Machine housekeeping. The objects will be gone immediately.\n\n"
+            f"Objects to delete: [bold]{len(state16):,}[/bold] "
+            f"({len(prev_16):,} .previous, {len(int_16):,} .interrupted)"
+            f"{dry_run_note}"
+        )
+        panel_title = "⚠  Repair: Delete State-16 Objects"
+    else:
+        action_desc = (
             f"This command will strip the [bold]sunlnk[/bold] flag and "
             f"[bold]deny-delete ACL[/bold] from state-16 transaction objects\n"
             f"on [bold]{destination.name}[/bold] ({destination.mount_point}).\n\n"
             f"This allows Time Machine to delete them during ThinningPostBackup.\n\n"
             f"Objects to process: [bold]{len(state16):,}[/bold] "
             f"({len(prev_16):,} .previous, {len(int_16):,} .interrupted)"
-            f"{dry_run_note}",
-            title="⚠  Repair: Strip ACLs",
-            border_style="yellow",
-            width=DEFAULT_WIDTH,
+            f"{dry_run_note}"
         )
+        panel_title = "⚠  Repair: Strip ACLs"
+
+    console.print()
+    console.print(
+        Panel(action_desc, title=panel_title, border_style="yellow", width=DEFAULT_WIDTH)
     )
     console.print()
 
@@ -1459,16 +1506,22 @@ def repair(strip_acls: bool, dry_run: bool, yes: bool) -> None:
     fail_count = 0
     failures: list[tuple[Path, str]] = []
 
+    task_label = "Deleting objects..." if delete else "Stripping protections..."
+    action_fn = _delete_transaction_object if delete else _strip_transaction_protections
+    dry_run_cmd = (
+        "sudo tm-doctor repair --delete" if delete else "sudo tm-doctor repair --strip-acls"
+    )
+
     with Progress(
         TextColumn("[bold]{task.description}"),
         BarColumn(),
         TextColumn("{task.completed}/{task.total}"),
         console=console,
     ) as progress:
-        task = progress.add_task("Stripping protections...", total=len(state16))
+        task = progress.add_task(task_label, total=len(state16))
 
         for tx in state16:
-            ok, err = _strip_transaction_protections(tx.path, dry_run)
+            ok, err = action_fn(tx.path, dry_run)
             if ok:
                 success_count += 1
             else:
@@ -1481,23 +1534,20 @@ def repair(strip_acls: bool, dry_run: bool, yes: bool) -> None:
     if dry_run:
         console.print(
             f"[dim]Dry run complete. {len(state16):,} objects would be processed.[/dim]\n\n"
-            "To apply: [bold]sudo tm-doctor repair --strip-acls[/bold]"
+            f"To apply: [bold]{dry_run_cmd}[/bold]"
         )
         return
 
+    verb = "deleted" if delete else "unprotected"
+
     if fail_count == 0:
-        console.print(
-            Panel(
-                f"[green]✓[/green]  {success_count:,} objects unprotected successfully.\n\n"
-                "Run a Time Machine backup to let ThinningPostBackup clean them up.",
-                title="Done",
-                border_style="green",
-                width=DEFAULT_WIDTH,
-            )
-        )
+        body = f"[green]✓[/green]  {success_count:,} objects {verb} successfully."
+        if not delete:
+            body += "\n\nRun a Time Machine backup to let ThinningPostBackup clean them up."
+        console.print(Panel(body, title="Done", border_style="green", width=DEFAULT_WIDTH))
     else:
         lines = [
-            f"[green]✓[/green]  {success_count:,} objects unprotected.",
+            f"[green]✓[/green]  {success_count:,} objects {verb}.",
             f"[red]✗[/red]  {fail_count:,} objects failed.",
         ]
         if failures[:5]:
