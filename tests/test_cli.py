@@ -1106,4 +1106,4 @@ def test_findings_spotlight_indexed_without_severe_state16():
     assert not _state16_severe_applies(report)
     findings = _state16_findings(report)
     assert any("Spotlight" in f for f in findings)
-    assert any("mdutil" in f for f in findings)
+    assert any("Spotlight Privacy" in f for f in findings)

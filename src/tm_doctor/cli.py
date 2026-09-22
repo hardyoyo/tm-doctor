@@ -1115,15 +1115,15 @@ def _state16_findings(report: DoctorReport) -> list[str]:
         )
 
     if report.spotlight_indexed is True:
-        mount = str(report.destination.mount_point)
         findings.append(
             "Spotlight indexing: Spotlight is currently indexing the Time Machine "
             "destination volume. This can cause mdworker to hold file handles on "
             "backup transaction objects, preventing Time Machine from deleting them "
-            "during ThinningPostBackup (afpAccessDenied errors). To disable indexing "
-            f"on this volume, run:\n\n    sudo mdutil -i off {mount}\n\n"
-            "Or add the volume manually via System Settings > Siri & Spotlight > "
-            "Spotlight Privacy."
+            "during ThinningPostBackup (afpAccessDenied errors). Add the volume to "
+            "the Spotlight Privacy list to disable indexing: System Settings > "
+            "Siri & Spotlight > Spotlight Privacy, then click + and add the backup "
+            "volume. Command-line methods (mdutil -i off, .metadata_never_index) "
+            "may fail silently on protected Time Machine volumes."
         )
 
     return findings
