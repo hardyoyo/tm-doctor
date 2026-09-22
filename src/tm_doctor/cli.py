@@ -1384,7 +1384,7 @@ def repair(strip_acls: bool, dry_run: bool, yes: bool) -> None:
 
     destination = mounted[0]
 
-    if os.geteuid() != 0:
+    if not dry_run and os.geteuid() != 0:
         console.print(
             Panel(
                 "This command requires root privileges.\n\nTry:\n\n"
