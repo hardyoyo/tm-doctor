@@ -1093,8 +1093,13 @@ def test_get_destination_spotlight_indexed_not_mounted():
     mock_cmd.assert_not_called()
 
 
-def test_findings_spotlight_indexed_without_severe_state16():
-    """Spotlight finding is raised even when state-16 is not severe."""
+def test_findings_spotlight_indexed_not_in_findings():
+    """Spotlight indexing is not surfaced as an actionable finding.
+
+    macOS blocks all methods of disabling Spotlight on TM volumes (mdutil,
+    .metadata_never_index, and the Privacy list GUI all fail), so surfacing
+    it as advice would be noise. It appears in render_checks only.
+    """
     report = DoctorReport(
         destination=_MOUNTED_DEST,
         backups=[],
@@ -1103,7 +1108,5 @@ def test_findings_spotlight_indexed_without_severe_state16():
         backup_status=_STATUS_IDLE,
         spotlight_indexed=True,
     )
-    assert not _state16_severe_applies(report)
     findings = _state16_findings(report)
-    assert any("Spotlight" in f for f in findings)
-    assert any("Spotlight Privacy" in f for f in findings)
+    assert not any("Spotlight" in f for f in findings)

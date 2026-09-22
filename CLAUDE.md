@@ -271,6 +271,32 @@ a deny-delete ACE. The `chflags` and `chmod -N` commands can strip these
 protections, but should only be used in an explicit repair command with
 clear user consent, after the safety question is resolved.
 
+### Spotlight indexing on Time Machine volumes
+
+`mdutil -s <volume>` reports whether Spotlight is indexing the backup destination.
+This is potentially relevant because `mdworker` could hold file handles on transaction
+objects during indexing, which might contribute to `afpAccessDenied` deletion failures
+during `ThinningPostBackup`.
+
+However, macOS **deliberately prevents disabling Spotlight indexing on Time Machine
+backup volumes** through all known channels:
+
+- `sudo mdutil -i off <volume>` sets `kMDConfigSearchLevelFSSearchOnly` but indexing
+  remains enabled (confirmed experimentally -- `mdutil -s` still returns "Indexing
+  enabled.")
+- `sudo touch <volume>/.metadata_never_index` fails (EPERM -- same volume protections
+  as the `sunlnk`/deny-delete ACL pattern)
+- System Settings > Siri & Spotlight > Spotlight Privacy shows the dialog:
+  "HJPtimeMachine2 is a Time Machine backup folder. You cannot add it to the
+  privacy list."
+
+This appears to be intentional Apple behavior. Whether Spotlight indexing actually
+contributes to the afpAccessDenied errors remains unconfirmed.
+
+`tm-doctor` surfaces the Spotlight status in the Checks panel as informational, but
+does not include it in the Advice panel because there is no actionable fix available
+to the user.
+
 ### Detecting afpAccessDenied via the unified log
 
 The unified log records each deletion failure. Query with:
