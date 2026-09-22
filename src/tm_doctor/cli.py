@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -1316,6 +1317,198 @@ def watch(interval: int) -> None:
                 live.update(_build_watch_panel(destinations, status))
     except KeyboardInterrupt:
         pass
+
+
+def _strip_transaction_protections(path: Path, dry_run: bool) -> tuple[bool, str | None]:
+    """Strip sunlnk flags and deny-delete ACLs from a transaction object tree.
+
+    Returns (success, error_message).
+    """
+    if dry_run:
+        return True, None
+
+    r_chflags = subprocess.run(
+        ["find", str(path), "-flags", "sunlnk", "-exec", "chflags", "nosunlnk", "{}", "+"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    subprocess.run(
+        ["find", str(path), "-exec", "chmod", "-N", "{}", "+"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if r_chflags.returncode != 0 and r_chflags.stderr.strip():
+        return False, r_chflags.stderr.strip()
+
+    return True, None
+
+
+@cli.command()
+@click.option(
+    "--strip-acls",
+    "strip_acls",
+    is_flag=True,
+    default=False,
+    help="Strip sunlnk flags and deny-delete ACLs from state-16 transaction objects.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would be changed without modifying anything.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt.",
+)
+def repair(strip_acls: bool, dry_run: bool, yes: bool) -> None:
+    """Explicit repair operations for a Time Machine destination.
+
+    Must be run as root (sudo tm-doctor repair ...).
+    """
+    if not strip_acls:
+        raise click.UsageError("Specify a repair operation. Currently available: --strip-acls")
+
+    destinations = get_destinations()
+    mounted = [d for d in destinations if d.mounted]
+
+    if not mounted:
+        raise click.ClickException("No mounted Time Machine destination found.")
+
+    destination = mounted[0]
+
+    if os.geteuid() != 0:
+        console.print(
+            Panel(
+                "This command requires root privileges.\n\nTry:\n\n"
+                "    sudo tm-doctor repair --strip-acls",
+                title="Error",
+                border_style="red",
+                width=DEFAULT_WIDTH,
+            )
+        )
+        raise SystemExit(1)
+
+    backup_status = get_backup_status()
+    if backup_status.running:
+        console.print(
+            Panel(
+                "A backup is currently running. Wait for it to finish before running repair.",
+                title="Error",
+                border_style="red",
+                width=DEFAULT_WIDTH,
+            )
+        )
+        raise SystemExit(1)
+
+    with console.status("[bold]Finding state-16 transaction objects...[/bold]"):
+        assert destination.mount_point is not None
+        transactions = get_transactions(destination.mount_point)
+
+    state16 = [t for t in transactions if t.snapshot_state == "16"]
+
+    if not state16:
+        console.print(
+            Panel(
+                "No state-16 transaction objects found. Nothing to do.",
+                title="Repair",
+                border_style="green",
+                width=DEFAULT_WIDTH,
+            )
+        )
+        return
+
+    prev_16 = [t for t in state16 if t.kind == "previous"]
+    int_16 = [t for t in state16 if t.kind == "interrupted"]
+
+    dry_run_note = (
+        "\n\n[bold yellow]Dry run -- no changes will be made.[/bold yellow]" if dry_run else ""
+    )
+
+    console.print()
+    console.print(
+        Panel(
+            f"This command will strip the [bold]sunlnk[/bold] flag and "
+            f"[bold]deny-delete ACL[/bold] from state-16 transaction objects\n"
+            f"on [bold]{destination.name}[/bold] ({destination.mount_point}).\n\n"
+            f"This allows Time Machine to delete them during ThinningPostBackup.\n\n"
+            f"Objects to process: [bold]{len(state16):,}[/bold] "
+            f"({len(prev_16):,} .previous, {len(int_16):,} .interrupted)"
+            f"{dry_run_note}",
+            title="⚠  Repair: Strip ACLs",
+            border_style="yellow",
+            width=DEFAULT_WIDTH,
+        )
+    )
+    console.print()
+
+    if not dry_run and not yes:
+        if not click.confirm("Continue?", default=False):
+            console.print("Aborted.")
+            return
+        console.print()
+
+    success_count = 0
+    fail_count = 0
+    failures: list[tuple[Path, str]] = []
+
+    with Progress(
+        TextColumn("[bold]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Stripping protections...", total=len(state16))
+
+        for tx in state16:
+            ok, err = _strip_transaction_protections(tx.path, dry_run)
+            if ok:
+                success_count += 1
+            else:
+                fail_count += 1
+                failures.append((tx.path, err or "unknown error"))
+            progress.advance(task)
+
+    console.print()
+
+    if dry_run:
+        console.print(f"[dim]Dry run complete. {len(state16):,} objects would be processed.[/dim]")
+        return
+
+    if fail_count == 0:
+        console.print(
+            Panel(
+                f"[green]✓[/green]  {success_count:,} objects unprotected successfully.\n\n"
+                "Run a Time Machine backup to let ThinningPostBackup clean them up.",
+                title="Done",
+                border_style="green",
+                width=DEFAULT_WIDTH,
+            )
+        )
+    else:
+        lines = [
+            f"[green]✓[/green]  {success_count:,} objects unprotected.",
+            f"[red]✗[/red]  {fail_count:,} objects failed.",
+        ]
+        if failures[:5]:
+            lines.append("\nFirst failures:")
+            for fpath, ferr in failures[:5]:
+                lines.append(f"  {fpath.name}: {ferr}")
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title="Done (with errors)",
+                border_style="yellow",
+                width=DEFAULT_WIDTH,
+            )
+        )
 
 
 if __name__ == "__main__":
